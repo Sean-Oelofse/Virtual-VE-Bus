@@ -184,10 +184,11 @@ class DbusMultiPlusEmulator:
         # ##################################################################################################################
 
         # check for changes in the dbus service list
-        # if int(time()) % 15 == 0 or self.system_items == {}:
-        #     start = time()
-        #     self.system_items, self.grid_items, self.ac_load_items = setup_dbus_external_items()
-        #     logging.info("Time to setup external dbus items: %s seconds" % (time() - start))
+        # this keeps the driver in sync when grid/ac-load services appear after startup
+        if int(time()) % 15 == 0 or self.system_items == {}:
+            start = time()
+            self.system_items, self.grid_items, self.ac_load_items = setup_dbus_external_items()
+            logging.info("Time to setup external dbus items: %s seconds" % (time() - start))
 
         # get DC values
         dc_power = self.zeroIfNone(self.system_items["/Dc/Battery/Power"].get_value())
@@ -314,7 +315,7 @@ class DbusMultiPlusEmulator:
                 if self.ac_load_items["/Ac/L1/Frequency"] is not None:
                     self._dbusservice["/Ac/ActiveIn/L1/F"] = self.ac_load_items["/Ac/L1/Frequency"].get_value()
                 elif self.grid_items != {} and self.grid_items["/Ac/L1/Frequency"] is not None:
-                    self._dbusservice["/Ac/ActiveIn/L1/F"] = self.ac_load_items["/Ac/L1/Frequency"].get_value()
+                    self._dbusservice["/Ac/ActiveIn/L1/F"] = self.grid_items["/Ac/L1/Frequency"].get_value()
                 else:
                     self._dbusservice["/Ac/ActiveIn/L1/F"] = grid_frequency
 
@@ -342,7 +343,7 @@ class DbusMultiPlusEmulator:
                 if self.ac_load_items["/Ac/L2/Frequency"] is not None:
                     self._dbusservice["/Ac/ActiveIn/L2/F"] = self.ac_load_items["/Ac/L2/Frequency"].get_value()
                 elif self.grid_items != {} and self.grid_items["/Ac/L2/Frequency"] is not None:
-                    self._dbusservice["/Ac/ActiveIn/L2/F"] = self.ac_load_items["/Ac/L2/Frequency"].get_value()
+                    self._dbusservice["/Ac/ActiveIn/L2/F"] = self.grid_items["/Ac/L2/Frequency"].get_value()
                 else:
                     self._dbusservice["/Ac/ActiveIn/L2/F"] = grid_frequency
 
@@ -370,7 +371,7 @@ class DbusMultiPlusEmulator:
                 if self.ac_load_items["/Ac/L3/Frequency"] is not None:
                     self._dbusservice["/Ac/ActiveIn/L3/F"] = self.ac_load_items["/Ac/L3/Frequency"].get_value()
                 elif self.grid_items != {} and self.grid_items["/Ac/L3/Frequency"] is not None:
-                    self._dbusservice["/Ac/ActiveIn/L3/F"] = self.ac_load_items["/Ac/L3/Frequency"].get_value()
+                    self._dbusservice["/Ac/ActiveIn/L3/F"] = self.grid_items["/Ac/L3/Frequency"].get_value()
                 else:
                     self._dbusservice["/Ac/ActiveIn/L3/F"] = grid_frequency
 
@@ -484,6 +485,45 @@ class DbusMultiPlusEmulator:
             self.zeroIfNone(self._dbusservice["/Ac/ActiveIn/L1/P"]) + self.zeroIfNone(self._dbusservice["/Ac/ActiveIn/L2/P"]) + self.zeroIfNone(self._dbusservice["/Ac/ActiveIn/L3/P"])
         )
         self._dbusservice["/Ac/ActiveIn/S"] = self._dbusservice["/Ac/ActiveIn/P"]
+
+        # set AC-out values
+        # Prefer AC-load meter values for AC-out, then system consumption, then active-in as fallback.
+        for phase in phase_used:
+            ac_load_phase_power_path = f"/Ac/{phase}/Power"
+            phase_power_path = f"/Ac/Consumption/{phase}/Power"
+            ac_out_phase_power_path = f"/Ac/Out/{phase}/P"
+            ac_out_phase_voltage_path = f"/Ac/Out/{phase}/V"
+            ac_out_phase_current_path = f"/Ac/Out/{phase}/I"
+            ac_out_phase_frequency_path = f"/Ac/Out/{phase}/F"
+            ac_out_phase_apparent_power_path = f"/Ac/Out/{phase}/S"
+            ac_out_phase_nominal_inverter_power_path = f"/Ac/Out/{phase}/NominalInverterPower"
+
+            if ac_load_phase_power_path in self.ac_load_items and self.ac_load_items[ac_load_phase_power_path] is not None:
+                self._dbusservice[ac_out_phase_power_path] = self.zeroIfNone(self.ac_load_items[ac_load_phase_power_path].get_value())
+            elif phase_power_path in self.system_items and self.system_items[phase_power_path] is not None:
+                self._dbusservice[ac_out_phase_power_path] = self.zeroIfNone(self.system_items[phase_power_path].get_value())
+            else:
+                self._dbusservice[ac_out_phase_power_path] = self.zeroIfNone(self._dbusservice[f"/Ac/ActiveIn/{phase}/P"])
+
+            self._dbusservice[ac_out_phase_apparent_power_path] = self._dbusservice[ac_out_phase_power_path]
+
+            if self.grid_items != {} and self.grid_items[f"/Ac/{phase}/Voltage"] is not None:
+                self._dbusservice[ac_out_phase_voltage_path] = self.grid_items[f"/Ac/{phase}/Voltage"].get_value()
+            else:
+                self._dbusservice[ac_out_phase_voltage_path] = grid_nominal_voltage
+
+            if self.grid_items != {} and self.grid_items[f"/Ac/{phase}/Frequency"] is not None:
+                self._dbusservice[ac_out_phase_frequency_path] = self.grid_items[f"/Ac/{phase}/Frequency"].get_value()
+            else:
+                self._dbusservice[ac_out_phase_frequency_path] = grid_frequency
+
+            voltage = self.zeroIfNone(self._dbusservice[ac_out_phase_voltage_path])
+            self._dbusservice[ac_out_phase_current_path] = round((self._dbusservice[ac_out_phase_power_path] / voltage), 2) if voltage != 0 else 0
+            self._dbusservice[ac_out_phase_nominal_inverter_power_path] = round(inverter_max_power / phase_count, 0)
+
+        self._dbusservice["/Ac/Out/P"] = self.zeroIfNone(self._dbusservice["/Ac/Out/L1/P"]) + self.zeroIfNone(self._dbusservice["/Ac/Out/L2/P"]) + self.zeroIfNone(self._dbusservice["/Ac/Out/L3/P"])
+        self._dbusservice["/Ac/Out/S"] = self._dbusservice["/Ac/Out/P"]
+        self._dbusservice["/Ac/Out/NominalInverterPower"] = inverter_max_power
 
         # get values from BMS
         # for bubble flow in chart and load visualization
@@ -879,6 +919,10 @@ def setup_dbus_external_items():
         dbus_objects_system["/Ac/ActiveIn/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L1/Power")
         dbus_objects_system["/Ac/ActiveIn/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L2/Power")
         dbus_objects_system["/Ac/ActiveIn/L3/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L3/Power")
+
+        dbus_objects_system["/Ac/Consumption/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L1/Power")
+        dbus_objects_system["/Ac/Consumption/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L2/Power")
+        dbus_objects_system["/Ac/Consumption/L3/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L3/Power")
 
         dbus_objects_system["/Ac/PvOnGrid/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/PvOnGrid/L1/Power")
         dbus_objects_system["/Ac/PvOnGrid/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/PvOnGrid/L2/Power")
