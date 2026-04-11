@@ -485,42 +485,6 @@ class DbusMultiPlusEmulator:
         )
         self._dbusservice["/Ac/ActiveIn/S"] = self._dbusservice["/Ac/ActiveIn/P"]
 
-        # set AC-out values
-        # Use system consumption if available to prevent AC-out dropping to 0 while charging from grid/generator.
-        for phase in phase_used:
-            phase_power_path = f"/Ac/Consumption/{phase}/Power"
-            ac_out_phase_power_path = f"/Ac/Out/{phase}/P"
-            ac_out_phase_voltage_path = f"/Ac/Out/{phase}/V"
-            ac_out_phase_current_path = f"/Ac/Out/{phase}/I"
-            ac_out_phase_frequency_path = f"/Ac/Out/{phase}/F"
-            ac_out_phase_apparent_power_path = f"/Ac/Out/{phase}/S"
-            ac_out_phase_nominal_inverter_power_path = f"/Ac/Out/{phase}/NominalInverterPower"
-
-            if phase_power_path in self.system_items and self.system_items[phase_power_path] is not None:
-                self._dbusservice[ac_out_phase_power_path] = self.zeroIfNone(self.system_items[phase_power_path].get_value())
-            else:
-                self._dbusservice[ac_out_phase_power_path] = self.zeroIfNone(self._dbusservice[f"/Ac/ActiveIn/{phase}/P"])
-
-            self._dbusservice[ac_out_phase_apparent_power_path] = self._dbusservice[ac_out_phase_power_path]
-
-            if self.grid_items != {} and self.grid_items[f"/Ac/{phase}/Voltage"] is not None:
-                self._dbusservice[ac_out_phase_voltage_path] = self.grid_items[f"/Ac/{phase}/Voltage"].get_value()
-            else:
-                self._dbusservice[ac_out_phase_voltage_path] = grid_nominal_voltage
-
-            if self.grid_items != {} and self.grid_items[f"/Ac/{phase}/Frequency"] is not None:
-                self._dbusservice[ac_out_phase_frequency_path] = self.grid_items[f"/Ac/{phase}/Frequency"].get_value()
-            else:
-                self._dbusservice[ac_out_phase_frequency_path] = grid_frequency
-
-            voltage = self.zeroIfNone(self._dbusservice[ac_out_phase_voltage_path])
-            self._dbusservice[ac_out_phase_current_path] = round((self._dbusservice[ac_out_phase_power_path] / voltage), 2) if voltage != 0 else 0
-            self._dbusservice[ac_out_phase_nominal_inverter_power_path] = round(inverter_max_power / phase_count, 0)
-
-        self._dbusservice["/Ac/Out/P"] = self.zeroIfNone(self._dbusservice["/Ac/Out/L1/P"]) + self.zeroIfNone(self._dbusservice["/Ac/Out/L2/P"]) + self.zeroIfNone(self._dbusservice["/Ac/Out/L3/P"])
-        self._dbusservice["/Ac/Out/S"] = self._dbusservice["/Ac/Out/P"]
-        self._dbusservice["/Ac/Out/NominalInverterPower"] = inverter_max_power
-
         # get values from BMS
         # for bubble flow in chart and load visualization
         self._dbusservice["/Ac/NumberOfPhases"] = phase_count
@@ -915,10 +879,6 @@ def setup_dbus_external_items():
         dbus_objects_system["/Ac/ActiveIn/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L1/Power")
         dbus_objects_system["/Ac/ActiveIn/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L2/Power")
         dbus_objects_system["/Ac/ActiveIn/L3/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/ActiveIn/L3/Power")
-
-        dbus_objects_system["/Ac/Consumption/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L1/Power")
-        dbus_objects_system["/Ac/Consumption/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L2/Power")
-        dbus_objects_system["/Ac/Consumption/L3/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/Consumption/L3/Power")
 
         dbus_objects_system["/Ac/PvOnGrid/L1/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/PvOnGrid/L1/Power")
         dbus_objects_system["/Ac/PvOnGrid/L2/Power"] = VeDbusItemImport(dbus_connection, dbus_service_system, "/Ac/PvOnGrid/L2/Power")
