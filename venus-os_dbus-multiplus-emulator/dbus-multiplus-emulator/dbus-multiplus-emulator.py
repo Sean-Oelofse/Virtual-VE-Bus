@@ -48,7 +48,7 @@ dbusServiceNameAcLoad = ""
 dbusServiceNamePvInverter = ""
 
 # enter the maximum power of the inverter of a single phase
-inverter_max_power = 14500
+inverter_max_power = 5000
 
 # uncomment or change the phase combination you are using
 # default: ["L1"]
@@ -109,7 +109,7 @@ class DbusMultiPlusEmulator:
         servicename,
         deviceinstance,
         paths,
-        productname="Powershare",
+        productname="Multiplus-II",
         connection="VE.Bus",
     ):
         self._dbusservice = VeDbusService(servicename)
