@@ -1,13 +1,14 @@
-## dbus-mutliplus-emulator - Emulates a MultiPlus II 48/5000/70-50
+## Virtual VE.Bus (dbus-multiplus-emulator) - Emulates a MultiPlus II 48/5000/70-50
 
-<small>GitHub repository: [mr-manuel/venus-os_dbus-multiplus-emulator](https://github.com/mr-manuel/venus-os_dbus-multiplus-emulator)</small>
+<small>GitHub repository: [sean-oelofse/virtual-ve-bus](https://github.com/sean-oelofse/virtual-ve-bus)</small>
+<small>Based on the original by [mr-manuel/venus-os_dbus-multiplus-emulator](https://github.com/mr-manuel/venus-os_dbus-multiplus-emulator)</small>
 
 ## Index
 
 1. [Disclaimer](#disclaimer)
-1. [Supporting/Sponsoring this project](#supportingsponsoring-this-project)
 1. [Purpose](#purpose)
 1. [Config](#config)
+1. [Feeding values over MQTT](#feeding-values-over-mqtt)
 1. [Install / Update](#install--update)
 1. [Uninstall](#uninstall)
 1. [Restart](#restart)
@@ -19,49 +20,107 @@
 
 I wrote this script for myself. I'm not responsible, if you damage something using my script.
 
-## Supporting/Sponsoring this project
-
-You like the project and you want to support me?
-
-[<img src="https://github.md0.eu/uploads/donate-button.svg" height="50">](https://www.paypal.com/donate/?hosted_button_id=3NEVZBDM5KABW)
-
-
 ## Purpose
-The script emulates a MultiPlus II in Venus OS. This allows to show the correct values in the overview.
+The script emulates a MultiPlus II in Venus OS. This allows the correct values to be shown in the overview.
 
 ## Config
-There is nothing specific to configure and it should work out of the box for systems that have only `L1`. If you have multiple phases, grid meters and/or batteries, then a configuration is maybe needed. In this case edit the `dbus-multiplus-emulator.py` and search for the `USER CHANGABLE VALUES | START` section.
+All settings live in `config.ini` (a copy of `config.sample.ini` is created automatically on first install). Edit that file and then restart the driver:
 
-In a multi-phase system, the DC loads are distributed based on the combined power from each phase of the grid and PV inverters. To achieve more accurate readings, you need to provide the power going in and out of the charger/inverter on the AC side. You can then use the [`dbus-mqtt-grid`](https://github.com/mr-manuel/venus-os_dbus-mqtt-grid) driver and configure it as an AC load to input these values into the emulator.
+```bash
+nano /data/etc/dbus-multiplus-emulator/config.ini
+bash /data/etc/dbus-multiplus-emulator/restart.sh
+```
 
-⚠️ Please note that the `AC Loads` value may not exactly match the actual values, because losses are included as part of the load.
+> **Note:** earlier versions ignored `config.ini` and only used the hard coded values inside the `.py` file. This version actually reads the config file, so editing it now takes effect.
 
+You can set the phase combination, inverter power, grid frequency/voltage, the dbus service names to read from, and the MQTT input (see below).
+
+### AC consumption while charging / on grid
+The AC-out (consumption) power is derived like this:
+
+- If an **AC-load meter** is configured (`dbus_service_name_ac_load`), its readings are used (measured loads minus any PV on the output).
+- Otherwise the value is estimated from the physics of the system, per phase: `AC-out = grid_in − battery_charge`. In a multi-phase system the battery (DC) power is split across the phases proportionally to each phase's grid power.
+
+This keeps the consumption correct whether the system is inverting, passing grid through, or **charging the battery from the grid/generator** — which is where the old "consumption goes weird when charging" behaviour came from. Values are also clamped to the inverter's nominal power so a single bad reading can't produce a nonsensical spike.
+
+⚠️ The `AC Loads` value may not exactly match the real value because conversion losses are counted as part of the load.
+
+## Feeding values over MQTT
+Instead of running separate `dbus-mqtt-*` drivers, the emulator can read values directly from an MQTT broker. Enable it in `config.ini`:
+
+```ini
+mqtt_enabled = True
+mqtt_address = 127.0.0.1
+mqtt_port = 1883
+mqtt_username =
+mqtt_password =
+mqtt_base_topic = veemu
+```
+
+The `paho-mqtt` python package is required and is installed automatically by `install.sh`.
+
+**Topics**
+
+- `veemu/set` — publish a full JSON document to update several values at once:
+
+    ```json
+    {
+      "battery": {"soc": 80, "power": -1200, "voltage": 52.1},
+      "grid": {"power": 300},
+      "acload": {"power": 450},
+      "pvinverter": {"power": 0}
+    }
+    ```
+
+- `veemu/set/<group>/<key>` — publish a single value, e.g.:
+
+    ```
+    topic  veemu/set/battery/soc     payload  80
+    topic  veemu/set/grid/power      payload  300
+    topic  veemu/set/grid/L1/power   payload  120
+    ```
+
+- `veemu/state` — the emulator publishes the current battery / AC-out / grid-in values here (retained) so you can read them back.
+
+Recognised keys:
+- **battery**: `soc`, `power`, `current`, `voltage`, `temperature` (battery `power` is positive when charging)
+- **grid / acload / pvinverter**: `power`, `current`, `voltage`, `frequency`, optionally nested under `L1` / `L2` / `L3`
+
+Example with `mosquitto_pub` on the device:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -t veemu/set -m '{"battery":{"soc":75,"power":-800},"grid":{"power":200}}'
+```
 
 ## Install / Update
 
-1. Login to your Venus OS device via SSH. See [Venus OS:Root Access](https://www.victronenergy.com/live/ccgx:root_access#root_access) for more details.
+1. Login to your Venus OS device via SSH. See [Venus OS: Root Access](https://www.victronenergy.com/live/ccgx:root_access#root_access) for more details.
 
-2. Execute this commands to download and copy the files:
+2. Download and run the installer directly from GitHub:
 
     ```bash
-    wget -O /tmp/download_dbus-multiplus-emulator.sh https://raw.githubusercontent.com/mr-manuel/venus-os_dbus-multiplus-emulator/master/download.sh
+    wget -O /tmp/download_virtual-ve-bus.sh https://raw.githubusercontent.com/sean-oelofse/virtual-ve-bus/main/venus-os_dbus-multiplus-emulator/download.sh
 
-    bash /tmp/download_dbus-multiplus-emulator.sh
+    bash /tmp/download_virtual-ve-bus.sh
     ```
 
-3. Select the version you want to install.
+    To install a specific branch instead of `main`, pass it as an argument, e.g.:
+
+    ```bash
+    bash /tmp/download_virtual-ve-bus.sh claude/virtual-vebus-mqtt-tyfebu
+    ```
 
 ### Extra steps for your first installation
 
-4. Edit the config file if you have a multi-phase system or if you want to have a custom configuration:
+3. Edit the config file (phases, MQTT, custom settings):
 
     ```bash
-    nano /data/etc/dbus-multiplus-emulator-2/config.ini
+    nano /data/etc/dbus-multiplus-emulator/config.ini
     ```
 
     Otherwise, skip this step.
 
-5. Install the driver as a service:
+4. Install the driver as a service:
 
     ```bash
     bash /data/etc/dbus-multiplus-emulator/install.sh

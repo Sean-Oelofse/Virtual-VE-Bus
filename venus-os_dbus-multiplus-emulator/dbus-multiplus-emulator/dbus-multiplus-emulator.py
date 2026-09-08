@@ -16,48 +16,131 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from vedbus import VeDbusService
 from dbusmonitor import DbusMonitor
 
-# use WARNING for default, INFO for displaying actual steps and values, DEBUG for debugging
-logging.basicConfig(level=logging.WARNING)
+# ------------------ CONFIGURATION LOADING | START ------------------
+#
+# All user changeable values now live in "config.ini" next to this script.
+# The values below are only the fall-back defaults that are used when
+# "config.ini" is missing or does not contain a given setting. This fixes the
+# long standing issue where editing config.ini had no effect at all, because
+# the script only ever used the hard coded values.
+
+import configparser
+
+# path to the config file (same folder as this script)
+config_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
 
 
-# ------------------ USER CHANGABLE VALUES | START ------------------
+def _load_config():
+    """
+    Load config.ini if present. Missing values fall back to the defaults, so an
+    old or partial config file keeps working.
+    """
+    config = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    # keep the original upper/lower case of the keys
+    config.optionxform = str
+    if os.path.isfile(config_file):
+        try:
+            config.read(config_file)
+            logging.info('Loaded configuration from "%s"' % config_file)
+        except Exception as e:
+            logging.error('Could not read "%s": %s' % (config_file, e))
+    else:
+        logging.warning('No config.ini found at "%s", using defaults' % config_file)
+    return config
 
-# enter grid frequency
-grid_frequency = 50.0000
 
-# enter grid nominal voltage
-# Europe
-grid_nominal_voltage = 230.0
-# UK/USA
-# grid_nominal_voltage = 120.0
+_config = _load_config()
+
+
+def _cfg(key, default, section="DEFAULT", cast=str):
+    """
+    Read a single value from the config, falling back to "default" and casting
+    it to the requested type. Never raises - a bad value logs a warning and the
+    default is used instead.
+    """
+    try:
+        if not _config.has_option(section, key):
+            return default
+        raw = _config.get(section, key).strip()
+        if raw == "":
+            return default
+        if cast is bool:
+            return raw.lower() in ("1", "true", "yes", "on")
+        return cast(raw)
+    except Exception as e:
+        logging.warning('Invalid value for "%s" in config.ini (%s), using default "%s"' % (key, e, default))
+        return default
+
+
+# ------------------ USER CHANGABLE VALUES (defaults) ------------------
+
+# logging level: ERROR, WARNING, INFO or DEBUG
+logging_level = _cfg("logging", "WARNING").upper()
+logging.basicConfig(level=getattr(logging, logging_level, logging.WARNING))
+
+# product/device name shown in the GUI
+device_name = _cfg("device_name", "MultiPlus-II xx/5000/xx-xx (emulated)")
+
+# enter grid frequency (used when the grid meter does not provide it)
+grid_frequency = _cfg("grid_frequency", 50.0000, cast=float)
+
+# enter grid nominal voltage (used when no voltage is provided)
+# Europe: 230, UK/USA: 120
+grid_nominal_voltage = _cfg("grid_nominal_voltage", 230.0, cast=float)
 
 # enter the dbusServiceName from which the battery data should be fetched, if there is more than one
 # e.g. com.victronenergy.battery.mqtt_battery_41
-dbusServiceNameBattery = ""
+dbusServiceNameBattery = _cfg("dbus_service_name_battery", "")
 
 # enter the dbusServiceName from which the grid meter data should be fetched, if there is more than one
 # e.g. com.victronenergy.grid.mqtt_grid_31
-dbusServiceNameGrid = ""
+dbusServiceNameGrid = _cfg("dbus_service_name_grid", "")
 
 # enter the dbusServiceName from which the AC load meter data should be fetched, if there is more than one
 # e.g. com.victronenergy.acload.mqtt_acload_51
-dbusServiceNameAcLoad = ""
+dbusServiceNameAcLoad = _cfg("dbus_service_name_ac_load", "")
 
 # enter the dbusServiceName from which the PV inverter data should be fetched, if there is more than one
 # e.g. com.victronenergy.pvinverter.mqtt_pvinverter_61
-dbusServiceNamePvInverter = ""
+dbusServiceNamePvInverter = _cfg("dbus_service_name_pv_inverter", "")
 
 # enter the maximum power of the inverter of a single phase
-inverter_max_power = 14500
+inverter_max_power = _cfg("inverter_max_power", 4500, cast=int)
 
-# uncomment or change the phase combination you are using
-# default: ["L1"]
-phase_used = ["L1"]
-# phase_used = ["L1", "L2"]
-# phase_used = ["L1", "L2", "L3"]
+# phase combination you are using, e.g. "L1" or "L1, L2, L3"
+phase_used = [p.strip() for p in _cfg("phase_used", "L1").split(",") if p.strip()]
+if not phase_used:
+    phase_used = ["L1"]
 
-# ------------------ USER CHANGABLE VALUES | END --------------------
+# ------------------ MQTT INPUT (optional) ------------------
+# When enabled, the emulator connects to an MQTT broker and lets you push
+# battery / grid / AC-load / PV-inverter values straight into the emulator,
+# so you no longer need separate dbus-mqtt-* drivers just to feed it.
+mqtt_enabled = _cfg("mqtt_enabled", False, cast=bool)
+mqtt_address = _cfg("mqtt_address", "127.0.0.1")
+mqtt_port = _cfg("mqtt_port", 1883, cast=int)
+mqtt_username = _cfg("mqtt_username", "")
+mqtt_password = _cfg("mqtt_password", "")
+# base topic; the emulator subscribes to "<base>/set" (JSON) and "<base>/set/#"
+# (single values) and publishes the current state to "<base>/state".
+mqtt_base_topic = _cfg("mqtt_base_topic", "veemu").strip("/")
 
+# ------------------ CONFIGURATION LOADING | END --------------------
+
+
+# optional MQTT client - only needed when mqtt_enabled is True
+mqtt_client_available = False
+if mqtt_enabled:
+    try:
+        import paho.mqtt.client as mqtt
+
+        mqtt_client_available = True
+    except ImportError:
+        logging.error(
+            "mqtt_enabled is set but the 'paho-mqtt' package is not installed. "
+            "Install it with 'pip install paho-mqtt' (the install.sh script does this for you). "
+            "Continuing WITHOUT the MQTT input."
+        )
 
 # specify how many phases are connected
 phase_count = len(phase_used)
@@ -109,7 +192,7 @@ class DbusMultiPlusEmulator:
         servicename,
         deviceinstance,
         paths,
-        productname="Powershare",
+        productname=device_name,
         connection="VE.Bus",
     ):
         self._dbusservice = VeDbusService(servicename)
@@ -306,10 +389,185 @@ class DbusMultiPlusEmulator:
             deviceRemovedCallback=self._device_removed,
         )
 
+        # start the optional MQTT input
+        self._mqtt = None
+        if mqtt_enabled and mqtt_client_available:
+            self._mqtt_start()
+
         GLib.timeout_add(1000, self._update)  # pause 1000ms before the next request
 
     def _create_dbus_monitor(self, *args, **kwargs):
         return DbusMonitor(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # MQTT input
+    # ------------------------------------------------------------------
+    def _mqtt_start(self):
+        """
+        Connect to the MQTT broker and start listening in a background thread.
+        Values received on the topics update the same dictionaries that the
+        dbus monitor uses, so the rest of the driver does not care where the
+        data comes from.
+        """
+        try:
+            self._mqtt = mqtt.Client(
+                client_id="dbus-multiplus-emulator-" + str(os.getpid())
+            )
+            if mqtt_username:
+                self._mqtt.username_pw_set(mqtt_username, mqtt_password or None)
+            self._mqtt.on_connect = self._on_mqtt_connect
+            self._mqtt.on_message = self._on_mqtt_message
+            logging.warning(
+                "Connecting to MQTT broker %s:%d (base topic '%s')"
+                % (mqtt_address, mqtt_port, mqtt_base_topic)
+            )
+            self._mqtt.connect_async(mqtt_address, mqtt_port, keepalive=60)
+            # loop_start runs the network loop in its own thread
+            self._mqtt.loop_start()
+        except Exception as e:
+            logging.error("Could not start MQTT client: %s" % e)
+            self._mqtt = None
+
+    def _on_mqtt_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            logging.warning("Connected to MQTT broker")
+            # full JSON updates
+            client.subscribe(mqtt_base_topic + "/set")
+            # single value updates, e.g. <base>/set/battery/soc
+            client.subscribe(mqtt_base_topic + "/set/#")
+        else:
+            logging.error("MQTT connection failed with code %s" % rc)
+
+    def _on_mqtt_message(self, client, userdata, msg):
+        try:
+            topic = msg.topic
+            payload = msg.payload.decode("utf-8").strip()
+            logging.info("MQTT message on '%s': %s" % (topic, payload))
+
+            # full JSON document on "<base>/set"
+            if topic == mqtt_base_topic + "/set":
+                self._apply_mqtt_payload(json.loads(payload))
+                return
+
+            # single value on "<base>/set/<group>/<key>" (optionally .../Lx/<key>)
+            prefix = mqtt_base_topic + "/set/"
+            if topic.startswith(prefix):
+                parts = topic[len(prefix):].split("/")
+                value = self._parse_number(payload)
+                nested = value
+                for key in reversed(parts[1:]):
+                    nested = {key: nested}
+                self._apply_mqtt_payload({parts[0]: nested})
+        except Exception as e:
+            logging.error("Could not process MQTT message: %s" % e)
+
+    @staticmethod
+    def _parse_number(text):
+        """Turn an MQTT payload into a float/int when possible, else keep the string."""
+        try:
+            if text.lower() in ("none", "null", ""):
+                return None
+            f = float(text)
+            return int(f) if f.is_integer() else f
+        except (ValueError, AttributeError):
+            return text
+
+    def _apply_mqtt_payload(self, data):
+        """
+        Map a friendly JSON structure onto the internal value dictionaries.
+
+        Example:
+        {
+          "battery": {"soc": 80, "power": -1200, "voltage": 52.1},
+          "grid":    {"power": 300},
+          "acload":  {"power": 450},
+          "pvinverter": {"power": 0}
+        }
+
+        Per-phase values are supported too:
+        {"grid": {"L1": {"power": 120, "voltage": 230}, "L2": {"power": 90}}}
+        """
+        if not isinstance(data, dict):
+            logging.error("MQTT payload is not a JSON object, ignoring")
+            return
+
+        battery_map = {
+            "soc": "/Soc",
+            "power": "/Dc/0/Power",
+            "current": "/Dc/0/Current",
+            "voltage": "/Dc/0/Voltage",
+            "temperature": "/Dc/0/Temperature",
+        }
+        ac_map = {
+            "power": "Power",
+            "current": "Current",
+            "voltage": "Voltage",
+            "frequency": "Frequency",
+        }
+
+        for group, values in data.items():
+            if not isinstance(values, dict):
+                continue
+            group = group.lower()
+
+            if group == "battery":
+                for key, val in values.items():
+                    path = battery_map.get(key.lower())
+                    if path is not None:
+                        self.batteryValues[path] = val
+                continue
+
+            target = {
+                "grid": self.gridValues,
+                "acload": self.acloadValues,
+                "ac_load": self.acloadValues,
+                "pvinverter": self.pvInverterValues,
+                "pv": self.pvInverterValues,
+            }.get(group)
+            if target is None:
+                continue
+
+            for key, val in values.items():
+                key_low = key.lower()
+                # per-phase object, e.g. "L1": {"power": 120}
+                if key_low in ("l1", "l2", "l3") and isinstance(val, dict):
+                    phase = key_low.upper()
+                    for subkey, subval in val.items():
+                        suffix = ac_map.get(subkey.lower())
+                        if suffix is not None:
+                            target["/Ac/%s/%s" % (phase, suffix)] = subval
+                # totals / single-phase shortcut, e.g. "power": 300
+                elif key_low in ac_map:
+                    suffix = ac_map[key_low]
+                    target["/Ac/" + suffix] = val
+                    # for a single phase system, also fill L1 so all math works
+                    if len(phase_used) == 1:
+                        target["/Ac/%s/%s" % (phase_used[0], suffix)] = val
+
+    def _publish_state(self):
+        """Publish the current values back to '<base>/state' as JSON (retained)."""
+        if self._mqtt is None:
+            return
+        try:
+            state = {
+                "battery": {
+                    "soc": self.batteryValues["/Soc"],
+                    "power": self.batteryValues["/Dc/0/Power"],
+                    "voltage": self.batteryValues["/Dc/0/Voltage"],
+                    "current": self.batteryValues["/Dc/0/Current"],
+                },
+                "acout": {
+                    "power": self._dbusservice["/Ac/Out/P"],
+                },
+                "gridin": {
+                    "power": self._dbusservice["/Ac/ActiveIn/P"],
+                },
+            }
+            self._mqtt.publish(
+                mqtt_base_topic + "/state", json.dumps(state), retain=True
+            )
+        except Exception as e:
+            logging.debug("Could not publish MQTT state: %s" % e)
 
     def _dbus_value_changed(
         self, dbusServiceName, dbusPath, dict, changes, deviceInstance
@@ -353,6 +611,49 @@ class DbusMultiPlusEmulator:
         Returns the value if it is not None, otherwise 0.
         """
         return value if value is not None else 0
+
+    def _calc_ac_out_power(self) -> dict:
+        """
+        Calculate the AC-out (inverter output) power for each used phase.
+
+        Preference order per phase:
+          1. AC-load meter reading (measured loads minus PV feeding them)
+          2. Physics estimate: grid_in - battery_charge_share
+
+        The result is clamped to the inverter's nominal power so a single bad
+        reading cannot produce a nonsensical spike in the consumption graph.
+        """
+        dc_power_total = self.zeroIfNone(self.batteryValues["/Dc/0/Power"])
+
+        # weight for splitting the DC power across the phases (by |grid power|)
+        grid_abs = {
+            p: abs(self.zeroIfNone(self.gridValues["/Ac/%s/Power" % p]))
+            for p in phase_used
+        }
+        grid_abs_sum = sum(grid_abs.values())
+
+        acout_p = {}
+        for p in phase_used:
+            acload_p = self.acloadValues["/Ac/%s/Power" % p]
+            pv_p = self.zeroIfNone(self.pvInverterValues["/Ac/%s/Power" % p])
+
+            if acload_p is not None:
+                # trust the measured AC-load meter (loads minus PV on output)
+                value = acload_p - pv_p
+            else:
+                # physics estimate: what the inverter must supply to the output
+                grid_p = self.zeroIfNone(self.gridValues["/Ac/%s/Power" % p])
+                if grid_abs_sum > 0:
+                    dc_share = dc_power_total * (grid_abs[p] / grid_abs_sum)
+                else:
+                    dc_share = dc_power_total / len(phase_used)
+                value = grid_p - dc_share
+
+            # clamp to the inverter's physical limits
+            value = max(-inverter_max_power, min(inverter_max_power, value))
+            acout_p[p] = round(value, 0)
+
+        return acout_p
 
     def _update(self):
         global data_watt_hours, data_watt_hours_timespan, data_watt_hours_save, data_watt_hours_storage_file, data_watt_hours_working_file, json_data, timestamp_storage_file
@@ -512,7 +813,13 @@ class DbusMultiPlusEmulator:
             self.gridValues["/Ac/L1/Power"] if "L1" in phase_used else None
         )
         self._dbusservice["/Ac/ActiveIn/L1/V"] = (
-            self.gridValues["/Ac/L1/Voltage"] if "L1" in phase_used else None
+            (
+                self.gridValues["/Ac/L1/Voltage"]
+                if self.gridValues["/Ac/L1/Voltage"] is not None
+                else grid_nominal_voltage
+            )
+            if "L1" in phase_used
+            else None
         )
 
         # L2 ----
@@ -535,7 +842,13 @@ class DbusMultiPlusEmulator:
             self.gridValues["/Ac/L2/Power"] if "L2" in phase_used else None
         )
         self._dbusservice["/Ac/ActiveIn/L2/V"] = (
-            self.gridValues["/Ac/L2/Voltage"] if "L2" in phase_used else None
+            (
+                self.gridValues["/Ac/L2/Voltage"]
+                if self.gridValues["/Ac/L2/Voltage"] is not None
+                else grid_nominal_voltage
+            )
+            if "L2" in phase_used
+            else None
         )
 
         # L3 ----
@@ -558,7 +871,13 @@ class DbusMultiPlusEmulator:
             self.gridValues["/Ac/L3/Power"] if "L3" in phase_used else None
         )
         self._dbusservice["/Ac/ActiveIn/L3/V"] = (
-            self.gridValues["/Ac/L3/Voltage"] if "L3" in phase_used else None
+            (
+                self.gridValues["/Ac/L3/Voltage"]
+                if self.gridValues["/Ac/L3/Voltage"] is not None
+                else grid_nominal_voltage
+            )
+            if "L3" in phase_used
+            else None
         )
 
         # calculate total values
@@ -573,18 +892,29 @@ class DbusMultiPlusEmulator:
         # for bubble flow in chart and load visualization
         self._dbusservice["/Ac/NumberOfPhases"] = phase_count
 
+        # ------------------------------------------------------------------
+        # calculate the AC-out (inverter output) power per phase
+        #
+        # When an AC-load meter is configured we trust its readings
+        # (measured loads minus any PV that feeds them directly).
+        #
+        # Otherwise we derive the inverter output from the physics of the
+        # system, per phase:
+        #     AC-out = grid_in - battery_charge
+        # The battery (DC) power is split across the phases proportionally to
+        # each phase's grid power. This keeps the AC consumption correct
+        # whether the system is inverting, passing grid through, or charging
+        # the battery from the grid/generator - which is where the old
+        # "consumption goes weird when charging" behaviour came from.
+        # ------------------------------------------------------------------
+        acout_p = self._calc_ac_out_power()
+
         # L1 ----
         self._dbusservice["/Ac/Out/L1/F"] = (
             self._dbusservice["/Ac/ActiveIn/L1/F"] if "L1" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L1/P"] = (
-            round(
-                self.zeroIfNone(self.acloadValues["/Ac/L1/Power"])
-                - self.zeroIfNone(self.pvInverterValues["/Ac/L1/Power"]),
-                0,
-            )
-            if "L1" in phase_used
-            else None
+            acout_p.get("L1") if "L1" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L1/S"] = (
             self._dbusservice["/Ac/Out/L1/P"] if "L1" in phase_used else None
@@ -622,13 +952,7 @@ class DbusMultiPlusEmulator:
             self._dbusservice["/Ac/ActiveIn/L2/F"] if "L2" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L2/P"] = (
-            round(
-                self.zeroIfNone(self.acloadValues["/Ac/L2/Power"])
-                - self.zeroIfNone(self.pvInverterValues["/Ac/L2/Power"]),
-                0,
-            )
-            if "L2" in phase_used
-            else None
+            acout_p.get("L2") if "L2" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L2/S"] = (
             self._dbusservice["/Ac/Out/L2/P"] if "L2" in phase_used else None
@@ -666,13 +990,7 @@ class DbusMultiPlusEmulator:
             self._dbusservice["/Ac/ActiveIn/L3/F"] if "L3" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L3/P"] = (
-            round(
-                self.zeroIfNone(self.acloadValues["/Ac/L3/Power"])
-                - self.zeroIfNone(self.pvInverterValues["/Ac/L3/Power"]),
-                0,
-            )
-            if "L3" in phase_used
-            else None
+            acout_p.get("L3") if "L3" in phase_used else None
         )
         self._dbusservice["/Ac/Out/L3/S"] = (
             self._dbusservice["/Ac/Out/L3/P"] if "L3" in phase_used else None
@@ -800,6 +1118,9 @@ class DbusMultiPlusEmulator:
         if index > 255:  # maximum value of the index
             index = 0  # overflow from 255 to 0
         self._dbusservice["/UpdateIndex"] = index
+
+        # publish the current state back to MQTT (if enabled)
+        self._publish_state()
 
         return True
 

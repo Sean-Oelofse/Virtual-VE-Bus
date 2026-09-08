@@ -10,6 +10,15 @@ chmod 744 $SCRIPT_DIR/uninstall.sh
 chmod 755 $SCRIPT_DIR/service/run
 chmod 755 $SCRIPT_DIR/service/log/run
 
+# install the paho-mqtt python package (needed only when the MQTT input is enabled)
+# this is a no-op if it is already installed
+if ! python -c "import paho.mqtt.client" >/dev/null 2>&1; then
+    echo "Installing paho-mqtt (needed for the MQTT input)..."
+    python -m pip install paho-mqtt >/dev/null 2>&1 \
+        || pip install paho-mqtt >/dev/null 2>&1 \
+        || echo "Could not install paho-mqtt automatically. Only needed if you set mqtt_enabled = True in config.ini."
+fi
+
 # create sym-link to run script in deamon
 ln -s $SCRIPT_DIR/service /service/$SERVICE_NAME
 
