@@ -124,6 +124,11 @@ mqtt_password = _cfg("mqtt_password", "")
 # base topic; the emulator subscribes to "<base>/set" (JSON) and "<base>/set/#"
 # (single values) and publishes the current state to "<base>/state".
 mqtt_base_topic = _cfg("mqtt_base_topic", "veemu").strip("/")
+# when True (default), the dbus monitor is not started while MQTT is active, so
+# the emulator does not scan the dbus for battery/grid/AC-load/PV services and
+# takes all its input from MQTT. Set to False for a hybrid setup where some
+# values still come from dbus services.
+mqtt_replace_dbus = _cfg("mqtt_replace_dbus", True, cast=bool)
 
 # ------------------ CONFIGURATION LOADING | END --------------------
 
@@ -382,16 +387,26 @@ class DbusMultiPlusEmulator:
             "/Ac/Voltage": None,
         }
 
-        self._dbusmonitor = self._create_dbus_monitor(
-            dbus_tree,
-            valueChangedCallback=self._dbus_value_changed,
-            deviceAddedCallback=self._device_added,
-            deviceRemovedCallback=self._device_removed,
-        )
+        # only run the dbus monitor when we actually need to read values from
+        # other dbus services. In a pure MQTT setup this is skipped, so the
+        # emulator does not scan the dbus for battery/grid/AC-load/PV devices.
+        mqtt_active = mqtt_enabled and mqtt_client_available
+        self._dbusmonitor = None
+        if not (mqtt_active and mqtt_replace_dbus):
+            self._dbusmonitor = self._create_dbus_monitor(
+                dbus_tree,
+                valueChangedCallback=self._dbus_value_changed,
+                deviceAddedCallback=self._device_added,
+                deviceRemovedCallback=self._device_removed,
+            )
+        else:
+            logging.warning(
+                "MQTT input active - dbus monitor disabled, reading all values from MQTT"
+            )
 
         # start the optional MQTT input
         self._mqtt = None
-        if mqtt_enabled and mqtt_client_available:
+        if mqtt_active:
             self._mqtt_start()
 
         GLib.timeout_add(1000, self._update)  # pause 1000ms before the next request
