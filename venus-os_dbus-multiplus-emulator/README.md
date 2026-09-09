@@ -59,6 +59,8 @@ mqtt_base_topic = veemu
 
 The `paho-mqtt` python package is required and is installed automatically by `install.sh`.
 
+While MQTT is active the driver does **not** start the dbus monitor, so it stops scanning the dbus for battery/grid/AC-load/PV services and reads everything from MQTT. If you want a hybrid setup (some values from MQTT, some still from dbus services), set `mqtt_replace_dbus = False`.
+
 **Topics**
 
 - `veemu/set` — publish a full JSON document to update several values at once:
