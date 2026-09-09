@@ -1,113 +1,68 @@
 #!/bin/bash
 
+# Installs the Virtual VE.Bus (dbus-multiplus-emulator) driver from GitHub.
+#
+# Usage:
+#   bash download.sh            # installs the "main" branch
+#   bash download.sh <branch>   # installs a specific branch/tag
+#
+# Because this repository keeps the driver in a sub-folder, this script knows
+# how to find it inside the downloaded zip and copies it to the right place.
+
+github_owner="sean-oelofse"
+github_repo="virtual-ve-bus"
+# path to the driver folder inside the repository
+repo_subpath="venus-os_dbus-multiplus-emulator/dbus-multiplus-emulator"
+
 driver_path="/data/etc"
 driver_name="dbus-multiplus-emulator"
 
-echo ""
-echo ""
-
-# fetch version numbers for different versions
-echo -n "Fetch current version numbers..."
-
-# latest release
-latest_release_stable=$(curl -s https://api.github.com/repos/mr-manuel/venus-os_${driver_name}/releases/latest | grep "tag_name" | cut -d : -f 2,3 | tr -d "\ " | tr -d \" | tr -d \,)
-
-# nightly build
-latest_release_nightly=$(curl -s https://raw.githubusercontent.com/mr-manuel/venus-os_${driver_name}/master/${driver_name}/${driver_name}.py | grep HardwareVersion | awk -F'"' '{print $4}')
-
-
-echo
-PS3=$'\nSelect which version you want to install and enter the corresponding number: '
-
-# create list of versions
-version_list=(
-    "latest release \"$latest_release_stable\""
-    "nightly build \"v$latest_release_nightly\""
-    "quit"
-)
-
-select version in "${version_list[@]}"
-do
-    case $version in
-        "latest release \"$latest_release_stable\"")
-            break
-            ;;
-        "nightly build \"v$latest_release_nightly\"")
-            break
-            ;;
-        "quit")
-            exit 0
-            ;;
-        *)
-            echo "> Invalid option: $REPLY. Please enter a number!"
-            ;;
-    esac
-done
-
-echo "> Selected: $version"
-echo ""
-
+# branch to install (first argument), default "main"
+branch="${1:-main}"
 
 echo ""
+echo "Installing '$driver_name' from https://github.com/${github_owner}/${github_repo} (branch: $branch)"
+echo ""
+
 if [ -d ${driver_path}/${driver_name} ]; then
-    echo "Updating driver '$driver_name' as '$driver_name'..."
+    echo "Existing installation found -> updating..."
 else
-    echo "Installing driver '$driver_name' as '$driver_name'..."
+    echo "No existing installation found -> installing..."
 fi
-
 
 # change to temp folder
 cd /tmp
 
-
-# download driver
+# download the selected branch as a zip
+url="https://github.com/${github_owner}/${github_repo}/archive/refs/heads/${branch}.zip"
 echo ""
-echo "Downloading driver..."
-
-
-## latest release
-if [ "$version" = "latest release \"$latest_release_stable\"" ]; then
-    # download latest release
-    url=$(curl -s https://api.github.com/repos/mr-manuel/venus-os_${driver_name}/releases/latest | grep "zipball_url" | sed -n 's/.*"zipball_url": "\([^"]*\)".*/\1/p')
-fi
-
-## nightly build
-if [ "$version" = "nightly build \"v$latest_release_nightly\"" ]; then
-    # download nightly build
-    url="https://github.com/mr-manuel/venus-os_${driver_name}/archive/refs/heads/master.zip"
-fi
-
 echo "Downloading from: $url"
-wget -O /tmp/venus-os_${driver_name}.zip "$url"
+wget -O /tmp/${github_repo}.zip "$url"
 
 # check if download was successful
-if [ ! -f /tmp/venus-os_${driver_name}.zip ]; then
+if [ ! -f /tmp/${github_repo}.zip ]; then
     echo ""
     echo "Download failed. Exiting..."
     exit 1
 fi
 
+# cleanup any previous extraction
+rm -rf /tmp/${github_repo}-extracted
 
-# If updating: cleanup old folder
-if [ -d /tmp/venus-os_${driver_name}-master ]; then
-    rm -rf /tmp/venus-os_${driver_name}-master
-fi
+# unzip
+echo "Unzipping..."
+mkdir -p /tmp/${github_repo}-extracted
+unzip -q /tmp/${github_repo}.zip -d /tmp/${github_repo}-extracted
 
+# find the driver folder inside the extracted repository
+source_dir=$(find /tmp/${github_repo}-extracted -maxdepth 3 -type d -path "*${repo_subpath}" | head -n 1)
 
-# unzip folder
-echo "Unzipping driver..."
-unzip venus-os_${driver_name}.zip
-
-# Find and rename the extracted folder to be always the same
-extracted_folder=$(find /tmp/ -maxdepth 1 -type d -name "*${driver_name}-*")
-
-if [ -n "$extracted_folder" ]; then
-    mv "$extracted_folder" /tmp/venus-os_${driver_name}-master
-else
-    echo "Error: Could not find extracted folder. Exiting..."
+if [ -z "$source_dir" ] || [ ! -f "$source_dir/${driver_name}.py" ]; then
+    echo ""
+    echo "Error: could not find '${repo_subpath}' inside the downloaded zip. Exiting..."
     exit 1
 fi
-
+echo "Found driver at: $source_dir"
 
 # If updating: backup existing config file
 if [ -f ${driver_path}/${driver_name}/config.ini ]; then
@@ -116,7 +71,6 @@ if [ -f ${driver_path}/${driver_name}/config.ini ]; then
     mv ${driver_path}/${driver_name}/config.ini ${driver_path}/${driver_name}_config.ini
 fi
 
-
 # If updating: cleanup existing driver
 if [ -d ${driver_path}/${driver_name} ]; then
     echo ""
@@ -124,18 +78,16 @@ if [ -d ${driver_path}/${driver_name} ]; then
     rm -rf ${driver_path}/${driver_name}
 fi
 
-
 # copy files
 echo ""
 echo "Copying new driver files..."
-cp -R /tmp/venus-os_${driver_name}-master/${driver_name}/ ${driver_path}/${driver_name}/
+cp -R "$source_dir" ${driver_path}/${driver_name}
 
 # remove temp files
 echo ""
 echo "Cleaning up temp files..."
-rm -rf /tmp/venus-os_${driver_name}.zip
-rm -rf /tmp/venus-os_${driver_name}-master
-
+rm -rf /tmp/${github_repo}.zip
+rm -rf /tmp/${github_repo}-extracted
 
 # If updating: restore existing config file
 if [ -f ${driver_path}/${driver_name}_config.ini ]; then
@@ -143,7 +95,6 @@ if [ -f ${driver_path}/${driver_name}_config.ini ]; then
     echo "Restoring existing config file..."
     mv ${driver_path}/${driver_name}_config.ini ${driver_path}/${driver_name}/config.ini
 fi
-
 
 # set permissions for files
 echo ""
@@ -155,29 +106,24 @@ chmod 755 ${driver_path}/${driver_name}/uninstall.sh
 chmod 755 ${driver_path}/${driver_name}/service/run
 chmod 755 ${driver_path}/${driver_name}/service/log/run
 
-
-# copy default config file
+# copy default config file on first installation
 if [ ! -f ${driver_path}/${driver_name}/config.ini ]; then
     echo ""
-    echo ""
     echo "First installation detected. Copying default config file..."
-    echo ""
-    echo "You can edit the config file with the following command:"
-    echo "nano ${driver_path}/${driver_name}/config.ini"
     cp ${driver_path}/${driver_name}/config.sample.ini ${driver_path}/${driver_name}/config.ini
     echo ""
-    echo "** Execute the install.sh script after you have edited the config file! **"
-    echo "You can execute the install.sh script with the following command:"
-    echo "bash ${driver_path}/${driver_name}/install.sh"
+    echo "You can edit the config file with:"
+    echo "  nano ${driver_path}/${driver_name}/config.ini"
+    echo ""
+    echo "** After editing the config, run install.sh to start the service: **"
+    echo "  bash ${driver_path}/${driver_name}/install.sh"
     echo ""
 else
     echo ""
-    echo "Restaring driver to apply new version..."
+    echo "Restarting driver to apply the new version..."
     /bin/bash ${driver_path}/${driver_name}/restart.sh
 fi
 
-
 echo
 echo "Done."
-echo
 echo
