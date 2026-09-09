@@ -677,6 +677,26 @@ class DbusMultiPlusEmulator:
 
         return acout_p
 
+    def _effective_dc_power(self, acout_p: dict) -> float:
+        """
+        Return the battery (DC) power used for the kWh energy counters.
+
+        If a battery value is provided (dbus or MQTT), use it directly.
+        Otherwise estimate it from the AC energy balance:
+            P_dc = P_grid_in - P_ac_out   (summed over the used phases)
+        so the energy counters keep working in a pure MQTT setup where only
+        grid and AC-load values are published and no battery is fed in.
+        Positive = charging, negative = discharging.
+        """
+        if self.batteryValues["/Dc/0/Power"] is not None:
+            return self.batteryValues["/Dc/0/Power"]
+
+        grid_total = sum(
+            self.zeroIfNone(self.gridValues["/Ac/%s/Power" % p]) for p in phase_used
+        )
+        acout_total = sum(self.zeroIfNone(acout_p.get(p)) for p in phase_used)
+        return grid_total - acout_total
+
     def _update(self):
         global data_watt_hours, data_watt_hours_timespan, data_watt_hours_save, data_watt_hours_storage_file, data_watt_hours_working_file, json_data, timestamp_storage_file
 
@@ -685,7 +705,11 @@ class DbusMultiPlusEmulator:
         # # # calculate watthours
         # measure power and calculate watthours, since it provides only watthours for production/import/consumption and no export
         # divide charging and discharging from dc
-        dc_power = self.zeroIfNone(self.batteryValues["/Dc/0/Power"])
+        # compute the AC-out power once and reuse it for the energy balance and
+        # the dbus values further down
+        acout_p = self._calc_ac_out_power()
+        # battery (DC) power, estimated from the AC balance when not provided
+        dc_power = self.zeroIfNone(self._effective_dc_power(acout_p))
         # charging (+)
         dc_power_charging = dc_power if dc_power > 0 else 0
         # discharging (-)
@@ -928,8 +952,8 @@ class DbusMultiPlusEmulator:
         # whether the system is inverting, passing grid through, or charging
         # the battery from the grid/generator - which is where the old
         # "consumption goes weird when charging" behaviour came from.
+        # (acout_p was already computed at the top of this update)
         # ------------------------------------------------------------------
-        acout_p = self._calc_ac_out_power()
 
         # L1 ----
         self._dbusservice["/Ac/Out/L1/F"] = (
