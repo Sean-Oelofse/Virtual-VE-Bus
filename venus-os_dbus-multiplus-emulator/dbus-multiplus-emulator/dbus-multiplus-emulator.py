@@ -425,9 +425,16 @@ class DbusMultiPlusEmulator:
         data comes from.
         """
         try:
-            self._mqtt = mqtt.Client(
-                client_id="dbus-multiplus-emulator-" + str(os.getpid())
-            )
+            client_id = "dbus-multiplus-emulator-" + str(os.getpid())
+            # paho-mqtt 2.x requires a callback_api_version argument. Our
+            # callbacks use the v1 signatures, so request VERSION1 when running
+            # on 2.x, and fall back to the 1.x constructor otherwise.
+            try:
+                self._mqtt = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION1, client_id=client_id
+                )
+            except (AttributeError, TypeError):
+                self._mqtt = mqtt.Client(client_id=client_id)
             if mqtt_username:
                 self._mqtt.username_pw_set(mqtt_username, mqtt_password or None)
             self._mqtt.on_connect = self._on_mqtt_connect
