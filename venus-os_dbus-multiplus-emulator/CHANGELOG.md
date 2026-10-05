@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0
+* Fixed: kWh counting - all six MultiPlus energy flow registers are now populated (grid->loads, grid->charger, inverter->loads, AC-out->charger, inverter->grid, AC-out->grid) by routing the measured power through a physical energy balance, instead of only two DC-derived counters
+* Added: DC power is estimated from the AC balance (grid_in - AC_out) when no battery is published, so the energy counters keep working in a pure MQTT setup
+* Changed: Persisted energy file migrates the old charging/discharging format so discharge/charge history is kept on upgrade
+
 ## v1.1.0
 * Added: Built-in MQTT client so values (battery, grid, AC-load, PV) can be pushed straight into the emulator without separate dbus-mqtt-* drivers
 * Added: Install directly from the GitHub repository (nested-folder aware download.sh, auto-installs paho-mqtt)
