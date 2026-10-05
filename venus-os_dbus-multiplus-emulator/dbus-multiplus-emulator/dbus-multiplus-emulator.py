@@ -149,6 +149,24 @@ if mqtt_enabled:
 
 # specify how many phases are connected
 phase_count = len(phase_used)
+
+# names of the energy flow registers the driver accumulates (kWh). These mirror
+# what a real MultiPlus reports, so the VRM energy breakdown is complete:
+#   AcIn1ToAcOut    grid passed through to the loads
+#   AcIn1ToInverter grid used to charge the battery
+#   InverterToAcOut battery supplying the loads (discharging)
+#   OutToInverter   AC-out side charging the battery (e.g. AC-coupled PV)
+#   InverterToAcIn1 battery feeding back to the grid
+#   AcOutToAcIn1    AC-out side (PV surplus) feeding back to the grid
+energy_flow_registers = (
+    "AcIn1ToAcOut",
+    "AcIn1ToInverter",
+    "InverterToAcOut",
+    "OutToInverter",
+    "InverterToAcIn1",
+    "AcOutToAcIn1",
+)
+
 # create dictionary for later to count watt hours
 data_watt_hours = {"time_creation": int(time()), "count": 0}
 # calculate and save watthours after every x seconds
@@ -677,47 +695,107 @@ class DbusMultiPlusEmulator:
 
         return acout_p
 
+    def _effective_dc_power(self, acout_p: dict) -> float:
+        """
+        Return the battery (DC) power used for the kWh energy counters.
+
+        If a battery value is provided (dbus or MQTT), use it directly.
+        Otherwise estimate it from the AC energy balance:
+            P_dc = P_grid_in - P_ac_out   (summed over the used phases)
+        so the energy counters keep working in a pure MQTT setup where only
+        grid and AC-load values are published and no battery is fed in.
+        Positive = charging, negative = discharging.
+        """
+        if self.batteryValues["/Dc/0/Power"] is not None:
+            return self.batteryValues["/Dc/0/Power"]
+
+        grid_total = sum(
+            self.zeroIfNone(self.gridValues["/Ac/%s/Power" % p]) for p in phase_used
+        )
+        acout_total = sum(self.zeroIfNone(acout_p.get(p)) for p in phase_used)
+        return grid_total - acout_total
+
+    def _calc_energy_flows(self, acin: float, acout: float, dc: float) -> dict:
+        """
+        Split the instantaneous power (W) into the MultiPlus energy flow paths.
+
+        Sign conventions:
+          acin  > 0 importing from grid, < 0 exporting to grid
+          acout > 0 power to the loads, < 0 surplus coming back from AC-out
+          dc    > 0 charging the battery, < 0 discharging the battery
+
+        The power is routed from sources (grid import, battery discharge,
+        AC-out surplus) to sinks (loads, battery charge, grid export) using a
+        fixed, physically sensible priority. Returns a dict of flow -> power(W),
+        all >= 0.
+        """
+        sources = {
+            "grid": max(acin, 0.0),  # power coming in from the grid
+            "batt": max(-dc, 0.0),  # battery discharge
+            "back": max(-acout, 0.0),  # surplus coming back from the AC-out side
+        }
+        sinks = {
+            "load": max(acout, 0.0),  # consumption on the output
+            "charge": max(dc, 0.0),  # battery charge
+            "export": max(-acin, 0.0),  # power pushed back to the grid
+        }
+
+        # (source, sink, register) in priority order
+        plan = (
+            ("grid", "load", "AcIn1ToAcOut"),
+            ("batt", "load", "InverterToAcOut"),
+            ("back", "charge", "OutToInverter"),
+            ("grid", "charge", "AcIn1ToInverter"),
+            ("back", "export", "AcOutToAcIn1"),
+            ("batt", "export", "InverterToAcIn1"),
+        )
+
+        flows = {reg: 0.0 for reg in energy_flow_registers}
+        for src, snk, reg in plan:
+            amount = min(sources[src], sinks[snk])
+            if amount > 0:
+                flows[reg] += amount
+                sources[src] -= amount
+                sinks[snk] -= amount
+        return flows
+
     def _update(self):
         global data_watt_hours, data_watt_hours_timespan, data_watt_hours_save, data_watt_hours_storage_file, data_watt_hours_working_file, json_data, timestamp_storage_file
 
         # ##################################################################################################################
 
         # # # calculate watthours
-        # measure power and calculate watthours, since it provides only watthours for production/import/consumption and no export
-        # divide charging and discharging from dc
-        dc_power = self.zeroIfNone(self.batteryValues["/Dc/0/Power"])
-        # charging (+)
-        dc_power_charging = dc_power if dc_power > 0 else 0
-        # discharging (-)
-        dc_power_discharging = dc_power * -1 if dc_power < 0 else 0
+        # accumulate every energy flow path (grid<->loads<->battery) over time
+        # and integrate them into cumulative kWh counters for the GUI/VRM.
+        # compute the AC-out power once and reuse it for the energy balance and
+        # the dbus values further down
+        acout_p = self._calc_ac_out_power()
+        # battery (DC) power, estimated from the AC balance when not provided
+        dc_power = self.zeroIfNone(self._effective_dc_power(acout_p))
+
+        # total AC-in (grid) and AC-out (loads) power across the used phases
+        acin_total = sum(
+            self.zeroIfNone(self.gridValues["/Ac/%s/Power" % p]) for p in phase_used
+        )
+        acout_total = sum(self.zeroIfNone(acout_p.get(p)) for p in phase_used)
+
+        # instantaneous power on each flow path (W, all >= 0)
+        flows_now = self._calc_energy_flows(acin_total, acout_total, dc_power)
 
         # timestamp
         timestamp = int(time())
 
         # check if x seconds are passed, if not sum values for calculation
         if data_watt_hours["time_creation"] + data_watt_hours_timespan > timestamp:
-            data_watt_hours_dc = {
-                "charging": round(
-                    (
-                        data_watt_hours["dc"]["charging"] + dc_power_charging
-                        if "dc" in data_watt_hours
-                        else dc_power_charging
-                    ),
-                    3,
-                ),
-                "discharging": round(
-                    (
-                        data_watt_hours["dc"]["discharging"] + dc_power_discharging
-                        if "dc" in data_watt_hours
-                        else dc_power_discharging
-                    ),
-                    3,
-                ),
+            previous = data_watt_hours.get("flows", {})
+            data_watt_hours_flows = {
+                reg: round(previous.get(reg, 0) + flows_now[reg], 3)
+                for reg in energy_flow_registers
             }
 
             data_watt_hours.update(
                 {
-                    "dc": data_watt_hours_dc,
+                    "flows": data_watt_hours_flows,
                     "count": data_watt_hours["count"] + 1,
                 }
             )
@@ -729,7 +807,6 @@ class DbusMultiPlusEmulator:
             # check if file in volatile storage exists
             if os.path.isfile(data_watt_hours_working_file):
                 with open(data_watt_hours_working_file, "r") as file:
-                    file = open(data_watt_hours_working_file, "r")
                     data_watt_hours_old = json.load(file)
                     logging.info("Loaded JSON")
                     logging.info(json.dumps(data_watt_hours_old))
@@ -737,52 +814,40 @@ class DbusMultiPlusEmulator:
             # if not, check if file in persistent storage exists
             elif os.path.isfile(data_watt_hours_storage_file):
                 with open(data_watt_hours_storage_file, "r") as file:
-                    file = open(data_watt_hours_storage_file, "r")
                     data_watt_hours_old = json.load(file)
                     logging.info("Loaded JSON from persistent storage")
                     logging.info(json.dumps(data_watt_hours_old))
 
             # if not, generate data
             else:
-                data_watt_hours_old_dc = {
-                    "charging": 0,
-                    "discharging": 0,
-                }
-                data_watt_hours_old = {"dc": data_watt_hours_old_dc}
+                data_watt_hours_old = {}
                 logging.info("Generated JSON")
-                logging.info(json.dumps(data_watt_hours_old))
 
-            # factor to calculate Watthours: mean power * measuuring period / 3600 seconds (1 hour)
+            # cumulative kWh counters from the stored file. Migrate the previous
+            # file format (which only had "dc" charging/discharging) so the main
+            # discharge/charge history is not lost on upgrade.
+            old_energy = data_watt_hours_old.get("energy", {})
+            if not old_energy and "dc" in data_watt_hours_old:
+                old_energy = {
+                    "InverterToAcOut": data_watt_hours_old["dc"].get("discharging", 0),
+                    "AcIn1ToInverter": data_watt_hours_old["dc"].get("charging", 0),
+                }
+
+            # factor to calculate Watthours: mean power * measuring period / 3600 seconds (1 hour)
             factor = (timestamp - data_watt_hours["time_creation"]) / 3600
+            count = data_watt_hours.get("count", 1) or 1
+            summed = data_watt_hours.get("flows", {})
 
-            dc_charging = round(
-                data_watt_hours_old["dc"]["charging"]
-                + (
-                    data_watt_hours["dc"]["charging"]
-                    / data_watt_hours["count"]
-                    * factor
+            energy = {}
+            for reg in energy_flow_registers:
+                energy[reg] = round(
+                    old_energy.get(reg, 0)
+                    + (summed.get(reg, 0) / count * factor) / 1000,
+                    3,
                 )
-                / 1000,
-                3,
-            )
-            dc_discharging = round(
-                data_watt_hours_old["dc"]["discharging"]
-                + (
-                    data_watt_hours["dc"]["discharging"]
-                    / data_watt_hours["count"]
-                    * factor
-                )
-                / 1000,
-                3,
-            )
 
             # update previously set data
-            json_data = {
-                "dc": {
-                    "charging": dc_charging,
-                    "discharging": dc_discharging,
-                }
-            }
+            json_data = {"energy": energy}
 
             # save data to volatile storage
             with open(data_watt_hours_working_file, "w") as file:
@@ -793,19 +858,12 @@ class DbusMultiPlusEmulator:
                 with open(data_watt_hours_storage_file, "w") as file:
                     file.write(json.dumps(json_data))
                 timestamp_storage_file = timestamp
-                logging.info(
-                    "Written JSON for OutToInverter (charging)/InverterToOut (discharging) to persistent storage."
-                )
+                logging.info("Written energy counters to persistent storage.")
 
-            # begin a new cycle
-            data_watt_hours_dc = {
-                "charging": round(dc_power_charging, 3),
-                "discharging": round(dc_power_discharging, 3),
-            }
-
+            # begin a new cycle, seeding it with the current sample
             data_watt_hours = {
                 "time_creation": timestamp,
-                "dc": data_watt_hours_dc,
+                "flows": {reg: round(flows_now[reg], 3) for reg in energy_flow_registers},
                 "count": 1,
             }
 
@@ -928,8 +986,8 @@ class DbusMultiPlusEmulator:
         # whether the system is inverting, passing grid through, or charging
         # the battery from the grid/generator - which is where the old
         # "consumption goes weird when charging" behaviour came from.
+        # (acout_p was already computed at the top of this update)
         # ------------------------------------------------------------------
-        acout_p = self._calc_ac_out_power()
 
         # L1 ----
         self._dbusservice["/Ac/Out/L1/F"] = (
@@ -1109,16 +1167,10 @@ class DbusMultiPlusEmulator:
         if phase_count == 3:
             self._dbusservice["/Devices/2/UpTime"] = int(time()) - time_driver_started
 
-        self._dbusservice["/Energy/InverterToAcOut"] = (
-            json_data["dc"]["discharging"]
-            if "dc" in json_data and "discharging" in json_data["dc"]
-            else 0
-        )
-        self._dbusservice["/Energy/OutToInverter"] = (
-            json_data["dc"]["charging"]
-            if "dc" in json_data and "charging" in json_data["dc"]
-            else 0
-        )
+        # write the cumulative energy counters (kWh) for every flow path
+        energy = json_data.get("energy", {}) if isinstance(json_data, dict) else {}
+        for reg in energy_flow_registers:
+            self._dbusservice["/Energy/" + reg] = energy.get(reg, 0)
 
         self._dbusservice["/Hub/ChargeVoltage"] = self.batteryValues[
             "/Info/MaxChargeVoltage"
